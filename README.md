@@ -24,6 +24,8 @@ amdddc-windows.exe --i2c-source-addr 0x50 setvcpserial 526192 0x91
 - Fixed broken ADL SDK submodule URL
 - Confirmed compatibility with the LG UltraGear 27GX704A-B
 
+```
+
 > [!IMPORTANT]
 > This utility will **_only_** work with an AMD GPU!
 > 
