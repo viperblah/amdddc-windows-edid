@@ -13,7 +13,7 @@ setvcpserial <serial> <input>
 Example:
 
 ```powershell
-amdddc-windows.exe --i2c-source-addr 0x50 setvcpserial 526192 0x91
+amdddc-windows.exe --i2c-source-addr 0x50 setvcpserial ###### 0x91
 ```
 
 ## Improvements
