@@ -1,3 +1,29 @@
+# What's New in This Fork
+
+This fork adds EDID serial-based monitor selection for AMD GPUs.
+
+Instead of relying on AMD adapter/display indexes (which may change after driver updates or monitor reconfiguration), monitors can now be selected using their EDID serial number.
+
+## New command
+
+```text
+setvcpserial <serial> <input>
+```
+
+Example:
+
+```powershell
+amdddc-windows.exe --i2c-source-addr 0x50 setvcpserial 526192 0x91
+```
+
+## Improvements
+
+- Added EDID serial output to `detect`
+- Added `setvcpserial`
+- Reduced unnecessary post-command delay
+- Fixed broken ADL SDK submodule URL
+- Confirmed compatibility with the LG UltraGear 27GX704A-B
+
 > [!IMPORTANT]
 > This utility will **_only_** work with an AMD GPU!
 > 
