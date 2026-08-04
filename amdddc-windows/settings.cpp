@@ -17,6 +17,7 @@ void print_help() {
     cout << "Commands:" << endl;
     cout << "  detect                               Print the available monitors and displays" << endl;
     cout << "  setvcp <monitor> <display> <input>   Set the VCP command (currently only input switching)" << endl;
+    cout << "  setvcpserial <serial> <input>        Find a display by EDID serial and switch its input" << endl;
     cout << "                                       <input> for LG DualUp: 0xD0 for DP1, 0xD1 for DP2/USB-C, 0x90 for HDMI, 0x91 for HDMI2" << endl;
 }
 
@@ -59,6 +60,22 @@ Settings parse_settings(int argc, const char** argv) {
             }
             else {
                 throw runtime_error{ "missing param after setvcp" };
+            }
+        }
+        else if (strcmp(argv[i], command_to_string.at(setvcpserial)) == 0) {
+            if (i + 2 < argc) {
+                istringstream converter1(argv[++i]), converter2(argv[++i]);
+                unsigned int value1, value2;
+
+                converter1 >> value1;
+                converter2 >> hex >> value2;
+
+                settings.serial = value1;
+                settings.input = value2;
+                settings.command = setvcpserial;
+            }
+            else {
+                throw runtime_error{ "missing param after setvcpserial" };
             }
         }
         else {

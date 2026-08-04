@@ -1,10 +1,19 @@
 #include "settings.h"
 #include "adl.h"
+
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 
 using namespace std;
 
-#pragma region setvcp command
+struct DisplayLocation {
+    int adapterIndex;
+    int displayIndex;
+};
+
+#pragma region setvcp_command
+
 #define SETWRITESIZE 8
 #define SET_VCPCODE_SUBADDRESS 1
 #define SET_VCPCODE_OFFSET 4
@@ -13,138 +22,305 @@ using namespace std;
 #define SET_CHK_OFFSET 7
 #define VCP_CODE_SWITCH_INPUT 0xF4
 
-unsigned char ucSetCommandWrite[SETWRITESIZE] = { 0x6e,0x51,0x84,0x03,0x00,0x00,0x00,0x00 };
+unsigned char ucSetCommandWrite[SETWRITESIZE] = {
+    0x6e, 0x51, 0x84, 0x03, 0x00, 0x00, 0x00, 0x00
+};
 
-int vWriteI2c(char* lpucSendMsgBuf, int iSendMsgLen, int iAdapterIndex, int iDisplayIndex)
+int vWriteI2c(char* sendBuffer, int sendLength, int adapterIndex, int displayIndex)
 {
-    int iRev = 0;
-    return adlprocs.ADL_Display_DDCBlockAccess_Get(iAdapterIndex, iDisplayIndex, NULL, NULL, iSendMsgLen, lpucSendMsgBuf, &iRev, NULL);
+    int receiveLength = 0;
+    return adlprocs.ADL_Display_DDCBlockAccess_Get(
+        adapterIndex, displayIndex, 0, 0,
+        sendLength, sendBuffer, &receiveLength, nullptr);
 }
 
-void vSetVcpCommand(unsigned int subaddress, unsigned char ucVcp, unsigned int ulVal, int iAdapterIndex, int iDisplayIndex)
+void vSetVcpCommand(
+    unsigned int subaddress,
+    unsigned char vcpCode,
+    unsigned int value,
+    int adapterIndex,
+    int displayIndex)
 {
-    unsigned int i;
-    unsigned char chk = 0;
-    int ADL_Err = ADL_ERR;
-    /*
-    * Following DDC/CI Spec defined here: https://boichat.ch/nicolas/ddcci/specs.html
-    *
-    UCHAR ucSetCommandWrite[8] =
-    0: 0x6e - I2C address     : 0x37, writing
-    1: 0x51 - I2C sub address : Using 0x50 for input switching on LG
-    2: 0x84 - For writes, the last 4 bits indicates the number of following bytes, excluding checksum (so, 0x84 is 0b10000100 or 4)
-    3: 0x03
-    4: 0x00 - Side Channel Code, so 0xF4
-    5: 0x00 - 0x00 -- ?? Guessing if the code is > 255
-    6: 0x00 - 0xD2 -- Display Code
-    7: 0x00 - Checksum using XOR of all preceding bytes, including the first
-    */
+    unsigned char checksum = 0;
 
-    /*
-    * Display codes:
-    * 0x00 - Auto?
-    * 0xD0 - DP1, Confirmed
-    * 0xD1 - USB-C, Confirmed (It's the DP-2 Alt, but DualUp doesn't have it)
-    * 0x90 - HDMI, Confiremed
-    * 0x91 - HDMI2, Confirmed
-    */
+    ucSetCommandWrite[SET_VCPCODE_SUBADDRESS] =
+        static_cast<unsigned char>(subaddress);
+    ucSetCommandWrite[SET_VCPCODE_OFFSET] = vcpCode;
+    ucSetCommandWrite[SET_LOW_OFFSET] =
+        static_cast<unsigned char>(value & 0xFF);
+    ucSetCommandWrite[SET_HIGH_OFFSET] =
+        static_cast<unsigned char>((value >> 8) & 0xFF);
 
-    ucSetCommandWrite[SET_VCPCODE_SUBADDRESS] = subaddress;
+    for (int i = 0; i < SET_CHK_OFFSET; i++) {
+        checksum ^= ucSetCommandWrite[i];
+    }
 
-    ucSetCommandWrite[SET_VCPCODE_OFFSET] = ucVcp;
-    ucSetCommandWrite[SET_LOW_OFFSET] = (char)(ulVal & 0x0ff);
-    ucSetCommandWrite[SET_HIGH_OFFSET] = (char)((ulVal >> 8) & 0x0ff);
+    ucSetCommandWrite[SET_CHK_OFFSET] = checksum;
 
-    for (i = 0; i < SET_CHK_OFFSET; i++)
-        chk = chk ^ ucSetCommandWrite[i];
+    int result = vWriteI2c(
+        reinterpret_cast<char*>(ucSetCommandWrite),
+        SETWRITESIZE,
+        adapterIndex,
+        displayIndex);
 
-    ucSetCommandWrite[SET_CHK_OFFSET] = chk;
-    ADL_Err = vWriteI2c((char*)&ucSetCommandWrite[0], SETWRITESIZE, iAdapterIndex, iDisplayIndex);
-    Sleep(5000);
+    if (result != ADL_OK) {
+        cerr << "Error: DDC write failed with ADL code "
+             << result << endl;
+    }
+
+    Sleep(250);
 }
+
 #pragma endregion
 
-#pragma region detect commnad
+#pragma region edid_and_detection
 
-void print_devices() {
-    int iNumberAdapters = 0;
-    int iAdapterIndex = 0;
-    int iNumberDisplays = 0;
-	int iDisplayIndex = 0;
-    int ADL_Err = ADL_ERR;
+unsigned int get_edid_serial(int adapterIndex, int displayIndex)
+{
+    ADLDisplayEDIDData edidData = {};
+    edidData.iSize = sizeof(ADLDisplayEDIDData);
 
-    adlprocs.ADL_Adapter_NumberOfAdapters_Get(&iNumberAdapters);
+    int result = adlprocs.ADL_Display_EdidData_Get(
+        adapterIndex, displayIndex, &edidData);
 
-    if (iNumberAdapters <= 0)
+    if (result != ADL_OK) {
+        return 0;
+    }
+
+    const unsigned char* edid =
+        reinterpret_cast<const unsigned char*>(edidData.cEDIDData);
+
+    return static_cast<unsigned int>(edid[12]) |
+        (static_cast<unsigned int>(edid[13]) << 8) |
+        (static_cast<unsigned int>(edid[14]) << 16) |
+        (static_cast<unsigned int>(edid[15]) << 24);
+}
+
+bool find_display_by_serial(
+    unsigned int targetSerial,
+    DisplayLocation& location)
+{
+    int numberAdapters = 0;
+
+    if (adlprocs.ADL_Adapter_NumberOfAdapters_Get(&numberAdapters) != ADL_OK ||
+        numberAdapters <= 0)
     {
+        return false;
+    }
+
+    LPAdapterInfo adapterInfo = static_cast<LPAdapterInfo>(
+        malloc(sizeof(AdapterInfo) * numberAdapters));
+
+    if (adapterInfo == nullptr) {
+        return false;
+    }
+
+    memset(adapterInfo, 0, sizeof(AdapterInfo) * numberAdapters);
+
+    if (adlprocs.ADL_Adapter_AdapterInfo_Get(
+        adapterInfo,
+        sizeof(AdapterInfo) * numberAdapters) != ADL_OK)
+    {
+        free(adapterInfo);
+        return false;
+    }
+
+    for (int i = 0; i < numberAdapters; i++) {
+        int adapterIndex = adapterInfo[i].iAdapterIndex;
+        int numberDisplays = 0;
+        LPADLDisplayInfo displayInfo = nullptr;
+
+        int result = adlprocs.ADL_Display_DisplayInfo_Get(
+            adapterIndex, &numberDisplays, &displayInfo, 0);
+
+        if (result != ADL_OK || displayInfo == nullptr) {
+            continue;
+        }
+
+        for (int j = 0; j < numberDisplays; j++) {
+            const int requiredFlags =
+                ADL_DISPLAY_DISPLAYINFO_DISPLAYCONNECTED |
+                ADL_DISPLAY_DISPLAYINFO_DISPLAYMAPPED;
+
+            if ((displayInfo[j].iDisplayInfoValue & requiredFlags) != requiredFlags) {
+                continue;
+            }
+
+            if (adapterIndex !=
+                displayInfo[j].displayID.iDisplayLogicalAdapterIndex)
+            {
+                continue;
+            }
+
+            int displayIndex =
+                displayInfo[j].displayID.iDisplayLogicalIndex;
+
+            unsigned int serial =
+                get_edid_serial(adapterIndex, displayIndex);
+
+            if (serial == targetSerial) {
+                location.adapterIndex = adapterIndex;
+                location.displayIndex = displayIndex;
+
+                ADL_Main_Memory_Free(
+                    reinterpret_cast<void**>(&displayInfo));
+                free(adapterInfo);
+                return true;
+            }
+        }
+
+        ADL_Main_Memory_Free(
+            reinterpret_cast<void**>(&displayInfo));
+    }
+
+    free(adapterInfo);
+    return false;
+}
+
+void print_devices()
+{
+    int numberAdapters = 0;
+    adlprocs.ADL_Adapter_NumberOfAdapters_Get(&numberAdapters);
+
+    if (numberAdapters <= 0) {
         cerr << "No AMD display devices found!" << endl;
         return;
     }
 
-    lpAdapterInfo = (LPAdapterInfo)malloc(sizeof(AdapterInfo) * iNumberAdapters);
-    memset(lpAdapterInfo, '\0', sizeof(AdapterInfo) * iNumberAdapters);
+    lpAdapterInfo = static_cast<LPAdapterInfo>(
+        malloc(sizeof(AdapterInfo) * numberAdapters));
 
-    // Get the AdapterInfo structure for all adapters in the system
-    adlprocs.ADL_Adapter_AdapterInfo_Get(lpAdapterInfo, sizeof(AdapterInfo) * iNumberAdapters);
+    memset(lpAdapterInfo, 0, sizeof(AdapterInfo) * numberAdapters);
 
-    // Repeat for all available adapters in the system
-    for (int i = 0; i < iNumberAdapters; i++) {
-        iAdapterIndex = lpAdapterInfo[i].iAdapterIndex;
-        ADL_Main_Memory_Free((void**)&lpAdlDisplayInfo);
+    adlprocs.ADL_Adapter_AdapterInfo_Get(
+        lpAdapterInfo,
+        sizeof(AdapterInfo) * numberAdapters);
 
-        ADL_Err = adlprocs.ADL_Display_DisplayInfo_Get(lpAdapterInfo[i].iAdapterIndex, &iNumberDisplays, &lpAdlDisplayInfo, 0);
+    for (int i = 0; i < numberAdapters; i++) {
+        int adapterIndex = lpAdapterInfo[i].iAdapterIndex;
+        int numberDisplays = 0;
 
-        cout << "Adapter Index: " << iAdapterIndex << " Adapter Name: " << lpAdapterInfo[i].strAdapterName << endl;
+        ADL_Main_Memory_Free(
+            reinterpret_cast<void**>(&lpAdlDisplayInfo));
 
-        for (int j = 0; j < iNumberDisplays; j++)
-        {
-            // For each display, check its status. Use the display only if it's connected AND mapped (iDisplayInfoValue: bit 0 and 1 )
-            if ((ADL_DISPLAY_DISPLAYINFO_DISPLAYCONNECTED | ADL_DISPLAY_DISPLAYINFO_DISPLAYMAPPED) !=
-                (ADL_DISPLAY_DISPLAYINFO_DISPLAYCONNECTED | ADL_DISPLAY_DISPLAYINFO_DISPLAYMAPPED & lpAdlDisplayInfo[j].iDisplayInfoValue))
-                continue;   // Skip the not connected or non-active displays
+        int result = adlprocs.ADL_Display_DisplayInfo_Get(
+            adapterIndex,
+            &numberDisplays,
+            &lpAdlDisplayInfo,
+            0);
 
-            // Is the display mapped to this adapter?
-            if ( iAdapterIndex != lpAdlDisplayInfo[ j ].displayID.iDisplayLogicalAdapterIndex )
+        cout << "Adapter Index: " << adapterIndex
+             << " Adapter Name: "
+             << lpAdapterInfo[i].strAdapterName
+             << endl;
+
+        if (result != ADL_OK || lpAdlDisplayInfo == nullptr) {
+            continue;
+        }
+
+        for (int j = 0; j < numberDisplays; j++) {
+            const int requiredFlags =
+                ADL_DISPLAY_DISPLAYINFO_DISPLAYCONNECTED |
+                ADL_DISPLAY_DISPLAYINFO_DISPLAYMAPPED;
+
+            if ((lpAdlDisplayInfo[j].iDisplayInfoValue & requiredFlags) != requiredFlags) {
                 continue;
+            }
 
-            // Preserve the Connected displays in PDL style :-)
-            iDisplayIndex = lpAdlDisplayInfo[j].displayID.iDisplayLogicalIndex;
+            if (adapterIndex !=
+                lpAdlDisplayInfo[j].displayID.iDisplayLogicalAdapterIndex)
+            {
+                continue;
+            }
 
-            cout << "\tDisplay Index : " << iDisplayIndex << " Display Name : " << lpAdlDisplayInfo[j].strDisplayName << endl;
+            int displayIndex =
+                lpAdlDisplayInfo[j].displayID.iDisplayLogicalIndex;
+
+            cout << "\tDisplay Index : " << displayIndex
+                 << " Display Name : "
+                 << lpAdlDisplayInfo[j].strDisplayName
+                 << " EDID Serial : "
+                 << get_edid_serial(adapterIndex, displayIndex)
+                 << endl;
         }
     }
 }
+
 #pragma endregion
 
 int main(int argc, const char* argv[])
 {
-    if (!InitADL())
-        exit(1);
+    if (!InitADL()) {
+        return 1;
+    }
 
     Settings settings;
 
     try {
         settings = parse_settings(argc, argv);
     }
-    catch (const runtime_error& e) {
-        cerr << "Error: " << e.what() << endl << endl;
+    catch (const runtime_error& error) {
+        cerr << "Error: " << error.what() << endl << endl;
         print_help();
+        FreeADL();
         return 1;
     }
 
     if (settings.help) {
         print_help();
+        FreeADL();
         return 0;
     }
+
+    int exitCode = 0;
 
     switch (settings.command) {
     case detect:
         print_devices();
         break;
+
     case setvcp:
-        vSetVcpCommand(settings.i2c_subaddress, VCP_CODE_SWITCH_INPUT, settings.input, settings.monitor, settings.display);
+        vSetVcpCommand(
+            settings.i2c_subaddress,
+            VCP_CODE_SWITCH_INPUT,
+            settings.input,
+            settings.monitor,
+            settings.display);
         break;
+
+    case setvcpserial:
+    {
+        DisplayLocation location = {};
+
+        if (!find_display_by_serial(settings.serial, location)) {
+            cerr << "Error: no active display found with EDID serial "
+                 << settings.serial << endl;
+            exitCode = 1;
+            break;
+        }
+
+        if (settings.verbose) {
+            cerr << "Matched EDID serial " << dec << settings.serial
+                 << " to adapter " << location.adapterIndex
+                 << ", display " << location.displayIndex
+                 << endl;
+        }
+
+        vSetVcpCommand(
+            settings.i2c_subaddress,
+            VCP_CODE_SWITCH_INPUT,
+            settings.input,
+            location.adapterIndex,
+            location.displayIndex);
+        break;
+    }
+
     default:
         print_help();
+        exitCode = 1;
+        break;
     }
+
+    FreeADL();
+    return exitCode;
 }
